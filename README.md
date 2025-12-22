@@ -3,7 +3,7 @@
 <img src='examples/vidar_logo.png' width=90>
 
 <a href='https://arxiv.org/abs/2507.12898'><img src='https://img.shields.io/badge/arXiv-2507.12898-b31b1b.svg'></a>
-<a href='https://arxiv.org/abs/2512.17661'><img src='https://img.shields.io/badge/arXiv-2512.17661-b31b1b.svg''</a>
+<a href='https://arxiv.org/abs/2512.17661'><img src='https://img.shields.io/badge/arXiv-2512.17661-b31b1b.svg'></a>
 [![Project Page](https://img.shields.io/badge/Project-Website-blue)](https://embodiedfoundation.github.io/vidar_anypos)
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Models-yellow)](https://huggingface.co/Xiang-cd/vidar)
 
