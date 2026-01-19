@@ -1,5 +1,14 @@
 #!/bin/bash
 
+# Source conda to ensure activate works
+source /root/miniconda3/etc/profile.d/conda.sh
+
+# Ensure we are in the correct directory (parent of 'server' package)
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+ROOT_DIR=$(dirname "$SCRIPT_DIR")
+cd "$ROOT_DIR"
+export PYTHONPATH="$ROOT_DIR:$PYTHONPATH"
+
 # 接收参数
 export MODEL=$1
 export IDM=$2

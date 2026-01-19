@@ -208,3 +208,8 @@ output/
 datasets/
 
 pretrainv1/
+vidar_ckpts/
+data
+vidar-robotwin/assets
+vidar_old/Vidar/vidar/output
+vidar_old/Vidar/vidar/wandb

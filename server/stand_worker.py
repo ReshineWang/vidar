@@ -79,7 +79,7 @@ def init():
     # 加载 WanTI2V 模型
     wan_ti2v = wan.WanTI2V(
         config=cfg,
-        checkpoint_dir="./Wan2.2-TI2V-5B",
+        checkpoint_dir="/data/dex/Motus/pretrained_models/Wan2.2-TI2V-5B",
         pt_dir=pt_dir,
         device_id=device,
         rank=rank,
