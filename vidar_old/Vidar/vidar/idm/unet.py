@@ -60,6 +60,8 @@ class UNet(nn.Module):
         self.out = nn.Conv2d(in_channels=base_channel, out_channels=self.out_channels, kernel_size=1)
 
     def forward(self, x):
+        if x.dim() == 5:
+            x = x.squeeze(1)
         x = self.in_conv(x)
         xs = [x]
         for down in self.downs:

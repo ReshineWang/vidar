@@ -7,6 +7,22 @@ import torch.nn as nn
 from tqdm import tqdm
 from datetime import datetime
 import cv2
+import sys
+import json
+
+class Logger(object):
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.log = open(filename, "a")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
 
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, random_split
@@ -46,6 +62,10 @@ def parse_args():
     parser.add_argument("--use_gt_mask", action="store_true", default=False, help="Use ground truth mask directly")
     parser.add_argument("--domain", type=str, default="default", help="Dataset domain: default or RoboTwin")
     parser.add_argument("--task_config", type=str, default="demo_clean_vidar", help="Task config subfolder name")
+    parser.add_argument("--num_frames", type=int, default=1, help="Number of frames for input (1, 2, or 3)")
+    parser.add_argument("--do_flip", action="store_true", default=False, help="Enable random flip augmentation")
+    parser.add_argument("--mixed_precision", type=str, default="no", choices=["no", "fp16", "bf16"], help="Mixed precision training (no, fp16, bf16)")
+    parser.add_argument("--crop_and_resize", action="store_true", default=False, help="Crop and resize input to 832x480")
     args = parser.parse_args()
     return args
 
@@ -105,7 +125,7 @@ def is_close(pos, output):
         return torch.all(torch.abs(pos - output) < limit, dim=1)
 
 
-def eval(accelerator: Accelerator, net: torch.nn.Module, dataloader: DataLoader, loss_fn, step, use_normalization, mode='val', save_dir='output'):
+def eval(accelerator: Accelerator, net: torch.nn.Module, dataloader: DataLoader, loss_fn, step, use_normalization, model_name, mode='val', save_dir='output'):
     os.makedirs(save_dir, exist_ok=True)
     accelerator.wait_for_everyone()
     net.eval()
@@ -138,13 +158,21 @@ def eval(accelerator: Accelerator, net: torch.nn.Module, dataloader: DataLoader,
                  # Case: We have GT masks, and the model is NOT a Mask model (e.g. ResNet).
                  # We assume this means use_gt_mask mode.
                  masked_images = images * masks
-                 output = net(masked_images)
+
+                 # Enforce efficient attention kernels
+                 with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=True):
+                     output = net(masked_images)
                  output = accelerator.gather(output)
                  mask = masks # For visualization
+
             else:
                  # Case: Normal training OR Mask model training (where mask is predicted)
                  # Even if masks (GT) are present, if model is Mask type, it predicts its own mask.
-                 output = net(images, return_mask=True)
+
+                 # Enforce efficient attention kernels
+                 with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=True):
+                     output = net(images, return_mask=True)
+
                  if isinstance(output, tuple):
                      output, mask = output
                      output = accelerator.gather(output)
@@ -172,6 +200,8 @@ def eval(accelerator: Accelerator, net: torch.nn.Module, dataloader: DataLoader,
                 
                 if first_batch:
                     sample_image = images[0].detach().cpu().numpy()
+                    if sample_image.ndim == 4:
+                        sample_image = sample_image[0]
                     sample_image = np.transpose(sample_image, (1, 2, 0))
                     sample_image *= np.array([0.229, 0.224, 0.225])
                     sample_image += np.array([0.485, 0.456, 0.406])
@@ -181,6 +211,8 @@ def eval(accelerator: Accelerator, net: torch.nn.Module, dataloader: DataLoader,
 
                     if masks is not None:
                         sample_masked = masked_images[0].detach().cpu().numpy()
+                        if sample_masked.ndim == 4:
+                            sample_masked = sample_masked[0]
                         sample_masked = np.transpose(sample_masked, (1, 2, 0))
                         sample_masked *= np.array([0.229, 0.224, 0.225])
                         sample_masked += np.array([0.485, 0.456, 0.406])
@@ -229,17 +261,29 @@ def eval(accelerator: Accelerator, net: torch.nn.Module, dataloader: DataLoader,
 
 def main(args):
     seed_torch(1234)
-    accelerator = Accelerator(kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True)])
+    accelerator = Accelerator(mixed_precision=args.mixed_precision, kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True)])
+    # accelerator = Accelerator(mixed_precision=args.mixed_precision)
+
     num_gpus = torch.cuda.device_count()
     save_dir = os.path.join(args.save_dir, f"{args.run_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     
     # Initialize wandb only if not in eval mode
     if accelerator.is_main_process and not args.eval_only:
         os.makedirs(save_dir, exist_ok=True)
+        
+        # Save args
+        with open(os.path.join(save_dir, "config.json"), "w") as f:
+            json.dump(args.__dict__, f, indent=4)
+            
+        sys.stdout = Logger(os.path.join(save_dir, "train.log"))
+        
         wandb.init(project=f"IDM_{args.model_name}", mode=args.wandb_mode, config=args.__dict__, name=args.run_name)
     
     if accelerator.is_main_process:
         print(f"{args.__dict__}")
+        print(f"PyTorch Version: {torch.__version__}")
+        print(f"Flash Attention (SDP) Enabled: {torch.backends.cuda.flash_sdp_enabled()}")
+        print(f"Mem Efficient Attention Enabled: {torch.backends.cuda.math_sdp_enabled()}")
 
     # Initialize preprocessor
     preprocessor = DinoPreprocessor(args)
@@ -248,7 +292,7 @@ def main(args):
     if args.domain == "RoboTwin":
         if accelerator.is_main_process:
             print(f"Using RoboTwinDataset from {args.dataset_path}")
-        dataset = RoboTwinDataset(args, dataset_path=args.dataset_path, disable_pbar=not accelerator.is_main_process, preprocessor=preprocessor, use_gt_mask=args.use_gt_mask)
+        dataset = RoboTwinDataset(args, dataset_path=args.dataset_path, disable_pbar=not accelerator.is_main_process, preprocessor=preprocessor, use_gt_mask=args.use_gt_mask, num_frames=args.num_frames, do_flip=args.do_flip)
     else:
         dataset = CacheDataSet(args, dataset_path=args.dataset_path, disable_pbar=not accelerator.is_main_process, preprocessor=preprocessor, use_gt_mask=args.use_gt_mask)
         
@@ -264,9 +308,9 @@ def main(args):
     val_dataloader = DataLoader(val_dataset, batch_size=args.eval_batch_size, shuffle=False,
                                 num_workers=args.num_workers, pin_memory=True, collate_fn=collate_fn, drop_last=False, prefetch_factor=args.prefetch_factor)
 
-    net = IDM(model_name=args.model_name, output_dim=14)
+    net = IDM(model_name=args.model_name, output_dim=14, num_frames=args.num_frames)
 
-    optimizer = AdamW(net.parameters())
+    optimizer = AdamW(net.parameters(), lr=args.learning_rate)
     net.train()
     loss_fn = nn.SmoothL1Loss()
 
@@ -318,7 +362,7 @@ def main(args):
 
     if args.eval_only:
         preprocessor.use_transform = False
-        eval(accelerator, net, val_dataloader, loss_fn, 0, args.use_normalization, mode='val', save_dir=save_dir)
+        eval(accelerator, net, val_dataloader, loss_fn, 0, args.use_normalization, args.model_name, mode='val', save_dir=save_dir)
         preprocessor.use_transform = args.use_transform
         return
 
@@ -332,10 +376,18 @@ def main(args):
             if masks is None:
                 raise ValueError("use_gt_mask is True but no masks found in batch")
             masked_images = images * masks
-            output = net(masked_images)
+           
+            # Enforce efficient attention kernels
+            with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=True):
+                output = net(masked_images)
+            
             mask = masks # For logging/vis if needed (though mask_loss is 0)
         else:
-            output = net(images, return_mask=True)
+            
+            # Enforce efficient attention kernels
+            with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=True):
+                output = net(images, return_mask=True)
+
             if isinstance(output, tuple):
                 output, mask = output
             else:
@@ -377,7 +429,7 @@ def main(args):
         if (step + 1) % args.eval_interval == 0:
             try:
                 preprocessor.use_transform = False
-                eval(accelerator, net, val_dataloader, loss_fn, step, args.use_normalization, mode='val', save_dir=save_dir)
+                eval(accelerator, net, val_dataloader, loss_fn, step, args.use_normalization, args.model_name, mode='val', save_dir=save_dir)
                 preprocessor.use_transform = args.use_transform
             except Exception as e:
                 print(f"Error during evaluation at step {step}: {str(e)}")
