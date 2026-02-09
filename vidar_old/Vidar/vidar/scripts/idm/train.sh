@@ -1,6 +1,6 @@
 #!/bin/bash
 # export CUDA_VISIBLE_DEVICES=0,1,2,3
-export CUDA_VISIBLE_DEVICES=4
+export CUDA_VISIBLE_DEVICES=0
 # source activate vidar
 # DATASET_PATH=/data/dex/vidar/data/cube-human-test
 DATASET_PATH=/data/dex/RoboTwin/data
@@ -23,7 +23,7 @@ accelerate launch --main_process_port=29352 train_idm.py \
     --mask_weight 3e-3 \
     --run_name "VIDAR" \
     --domain RoboTwin \
-    --task_config demo_clean_vidar \
+    --task_config demo_clean \
     --num_frames 3 \
     --mixed_precision bf16 \
     --do_flip \

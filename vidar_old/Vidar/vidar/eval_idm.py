@@ -71,6 +71,7 @@ def parse_args():
     parser.add_argument("--do_flip", action="store_true", default=False, help="Enable random flip augmentation")
     parser.add_argument("--mixed_precision", type=str, default="no", choices=["no", "fp16", "bf16"], help="Mixed precision training (no, fp16, bf16)")
     parser.add_argument("--crop_and_resize", action="store_true", default=False, help="Crop and resize input to 832x480")
+    parser.add_argument("--compute_smoothness", action="store_true", default=False, help="Compute smoothness reward")
 
     return parser.parse_args()
 
@@ -186,6 +187,12 @@ def process_dataset(args, net, preprocessor, accelerator):
             
             plot_actions(all_gts, all_preds, args.save_dir, f"video_{i:02d}")
 
+            # Smoothness Reward (optional)
+            if args.compute_smoothness:
+                all_preds_tensor = torch.tensor(all_preds)
+                smoothness_reward = compute_smoothness(all_preds_tensor)
+                print(f"Computed Smoothness Reward for dataset: {smoothness_reward:.4f}")
+
     else:
         print(f"No val_indices provided and no video structure found. Evaluating first 400 frames.")
         dataset = Subset(dataset, list(range(min(400, len(dataset)))))
@@ -199,6 +206,9 @@ def process_dataset(args, net, preprocessor, accelerator):
         
         if len(all_preds) > 0:
              plot_actions(all_gts, all_preds, args.save_dir, "dataset_first_samples")
+
+
+        
 
 def process_single_hdf5(args, net, preprocessor, accelerator):
     print(f"Processing single HDF5 mode: {args.hdf5_path}")
@@ -295,14 +305,26 @@ def process_single_hdf5(args, net, preprocessor, accelerator):
 
             # Calculate indices matching RoboTwinDataset logic
             indices_to_load = []
-            if args.num_frames == 1:
-                indices_to_load = [local_idx]
-            elif args.num_frames == 2:
-                indices_to_load = [local_idx - 2, local_idx]
-            elif args.num_frames == 3:
-                indices_to_load = [local_idx - 2, local_idx, local_idx + 2]
+            
+            if args.crop_and_resize:
+
+                if args.num_frames == 1:
+                    indices_to_load = [local_idx]
+                elif args.num_frames == 2:
+                    indices_to_load = [local_idx - 2, local_idx]
+                elif args.num_frames == 3:
+                    indices_to_load = [local_idx - 2, local_idx, local_idx + 2]
+                else:
+                    raise ValueError(f"Unsupported num_frames: {args.num_frames}")
             else:
-                raise ValueError(f"Unsupported num_frames: {args.num_frames}")
+                if args.num_frames == 1:
+                    indices_to_load = [local_idx]
+                elif args.num_frames == 2:
+                    indices_to_load = [local_idx - 1, local_idx]
+                elif args.num_frames == 3:
+                    indices_to_load = [local_idx - 1, local_idx, local_idx + 1]
+                else:
+                    raise ValueError(f"Unsupported num_frames: {args.num_frames}")
 
             images_list = []
             for frame_idx in indices_to_load:
@@ -364,6 +386,12 @@ def process_single_hdf5(args, net, preprocessor, accelerator):
     
     # 4. Plot
     plot_actions(gt_arr, pred_arr, args.save_dir, "single_hdf5_eval")
+
+    # 5. Smoothness Reward
+    if args.compute_smoothness:
+        smoothness_reward = compute_smoothness(torch.tensor(pred_arr))
+        print(f"Computed Smoothness Reward: {smoothness_reward:.4f}")
+
 
 def plot_actions(gt_actions, pred_actions, save_dir, sample_idx):
     """
@@ -520,14 +548,27 @@ def process_single_video(args, net, preprocessor, accelerator):
 
         # Calculate indices matching RoboTwinDataset logic
         indices_to_load = []
-        if args.num_frames == 1:
-            indices_to_load = [local_idx]
-        elif args.num_frames == 2:
-            indices_to_load = [local_idx - 2, local_idx]
-        elif args.num_frames == 3:
-            indices_to_load = [local_idx - 2, local_idx, local_idx + 2]
+        
+        if args.crop_and_resize:
+
+            if args.num_frames == 1:
+                indices_to_load = [local_idx]
+            elif args.num_frames == 2:
+                indices_to_load = [local_idx - 2, local_idx]
+            elif args.num_frames == 3:
+                indices_to_load = [local_idx - 2, local_idx, local_idx + 2]
+            else:
+                raise ValueError(f"Unsupported num_frames: {args.num_frames}")
         else:
-            raise ValueError(f"Unsupported num_frames: {args.num_frames}")
+            if args.num_frames == 1:
+                indices_to_load = [local_idx]
+            elif args.num_frames == 2:
+                indices_to_load = [local_idx - 1, local_idx]
+            elif args.num_frames == 3:
+                indices_to_load = [local_idx - 1, local_idx, local_idx + 1]
+            else:
+                raise ValueError(f"Unsupported num_frames: {args.num_frames}")
+            
 
         images_list = []
         for frame_idx in indices_to_load:
@@ -625,7 +666,132 @@ def process_single_video(args, net, preprocessor, accelerator):
         print(f"No action file provided. Predicted {len(pred_arr)} steps. Plotting predictions only.")
         plot_actions(np.zeros_like(pred_arr), pred_arr, args.save_dir, "single_mask_eval_no_gt")
 
+    # Optional: Compute smoothness reward
+    if args.compute_smoothness:
+        action_tensor = torch.tensor(pred_arr)
+        smoothness_reward = compute_smoothness(action_tensor)
+        print(f"Computed Smoothness Reward: {smoothness_reward:.4f}")
 
+
+def compute_smoothness(actions):
+    """
+    Smoothness reward for 14D actions.
+
+    actions: [T, 14]
+    - joint dims are radians
+    - dim 6 and 13 are grippers in [0,1]
+    - fps = 16Hz => dt = 1/16
+
+    Returns:
+      score (float): higher is smoother, in [0, 10] approximately.
+    """
+    if actions.shape[0] < 4:
+        return 0.0
+
+    dt = 1.0 / 16.0
+    T, D = actions.shape
+    device, dtype = actions.device, actions.dtype
+
+    # ---- dims ----
+    grip_dims = [6, 13]
+
+    # ---- per-dim speed limits (rad/s) ----
+    # PiPER joint max speed (deg/s): J1 180, J2 195, J3 180, J4-6 225
+    # -> rad/s: 3.1416, 3.4034, 3.1416, 3.9270, 3.9270, 3.9270
+    v_arm = torch.tensor([3.1416, 3.4034, 3.1416, 3.9270, 3.9270, 3.9270],
+                         device=device, dtype=dtype)
+    safety = 0.85
+    v_arm = v_arm * safety
+
+    v_max = torch.zeros(D, device=device, dtype=dtype)
+    v_max[0:6] = v_arm
+    v_max[7:13] = v_arm
+    v_max[6] = 2.0   # gripper units/s
+    v_max[13] = 2.0
+
+    # ---- per-dim accel limits (rad/s^2) ----
+    a_max = torch.full((D,), 5.0, device=device, dtype=dtype)
+    a_max[6] = 10.0  # gripper units/s^2
+    a_max[13] = 10.0
+
+    # ---- finite differences ----
+    v = (actions[1:] - actions[:-1]) / dt      # [T-1, D]
+    a = (v[1:] - v[:-1]) / dt                  # [T-2, D]
+    j = (a[1:] - a[:-1]) / dt                  # [T-3, D]
+
+    # ---- huber ----
+    def huber(x, delta):
+        ax = x.abs()
+        return torch.where(ax <= delta, 0.5 * (x ** 2), delta * (ax - 0.5 * delta))
+
+    # ---- dim weights ----
+    w = torch.ones(D, device=device, dtype=dtype)
+    w[6] = 0.2
+    w[13] = 0.2
+    w = w / (w.mean() + 1e-8)
+
+    # ---- huber thresholds ----
+    delta_a = a_max * 0.5                 # [D]
+    delta_j = (a_max / dt) * 0.5          # [D]  (since jerk ~ Δa/dt)
+
+    # ---- energy penalties ----
+    # broadcast: a/j shape [..., D], delta_*/w shape [D]
+    acc_pen  = (huber(a, delta_a) * w).mean()
+    jerk_pen = (huber(j, delta_j) * w).mean()
+
+    # ---- soft-limit penalties ----
+    v_violate = torch.relu(v.abs() - v_max)
+    a_violate = torch.relu(a.abs() - a_max)
+    vlim_pen = ((v_violate ** 2) * w).mean()
+    alim_pen = ((a_violate ** 2) * w).mean()
+
+    # ---- total penalty ----
+    penalty_raw = (
+        0.5 * jerk_pen +
+        0.25 * acc_pen +
+        2.0 * vlim_pen +
+        1.0 * alim_pen
+    )
+
+    # ---- debug prints (opt-in) ----
+    # Set env: DEBUG_SMOOTHNESS=1 to print
+    with torch.no_grad():
+        # basic stats to see scale
+        v_max_abs = v.abs().max().item()
+        a_max_abs = a.abs().max().item()
+        j_max_abs = j.abs().max().item()
+
+        v_mean = v.abs().mean().item()
+        a_mean = a.abs().mean().item()
+        j_mean = j.abs().mean().item()
+
+        print(
+            "[DEBUG] Smoothness components:\n"
+            f"  penalty_raw = {penalty_raw.item():.4f}\n"
+            f"    jerk_pen  = {jerk_pen.item():.4f}\n"
+            f"    acc_pen   = {acc_pen.item():.4f}\n"
+            f"    vlim_pen  = {vlim_pen.item():.4f}\n"
+            f"    alim_pen  = {alim_pen.item():.4f}\n"
+            f"  stats:\n"
+            f"    max|v|={v_max_abs:.4f}, mean|v|={v_mean:.4f}\n"
+            f"    max|a|={a_max_abs:.4f}, mean|a|={a_mean:.4f}\n"
+            f"    max|j|={j_max_abs:.4f}, mean|j|={j_mean:.4f}\n"
+        )
+
+    P = penalty_raw
+
+    # reference scale: roughly "good smoothness" level
+    P0 = 2000.0      # try 2000 ~ 5000
+
+    gamma = 0.5      # 0.5 is very safe for GRPO
+    MaxReward = 10.0
+
+    score = MaxReward * torch.pow(1.0 + P / P0, -gamma)
+
+    return score.item()
+
+
+        
 
 def main():
     args = parse_args()

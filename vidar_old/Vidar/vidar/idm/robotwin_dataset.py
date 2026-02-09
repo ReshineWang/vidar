@@ -32,7 +32,7 @@ class RoboTwinDataset(Dataset):
         self.action_key = "joint_action/vector"
         self.rgb_key = "observation/head_camera/rgb"
         self.mask_key = "observation/head_camera/left_arm_mask"
-        self.task_config = getattr(args, 'task_config', 'demo_clean_vidar')
+        self.task_config = getattr(args, 'task_config', 'demo_clean')
 
         self.h5_paths = []
         self.lengths = []
