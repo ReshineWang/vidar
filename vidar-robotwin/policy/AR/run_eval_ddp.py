@@ -94,6 +94,14 @@ def run_client_task(task_name: str, args, port: int, output_dir_base: str, local
 
     os.makedirs(task_out_dir, exist_ok=True)
     
+    # 构建 GT Action Path (如果是 gt_action 模式)
+    gt_data_dir = ""
+    if args.mode == "gt_action":
+        gt_data_dir = f"/data/dex/RoboTwin/data/{task_name}/demo_clean_vidar/data"
+        if not os.path.exists(gt_data_dir):
+            logger.warning(f"GT Data dir not found for {task_name}: {gt_data_dir}")
+            pass 
+
     cmd = [
         "python", "script/eval_policy.py",
         "--config", "policy/AR/deploy_policy.yml",
@@ -110,8 +118,12 @@ def run_client_task(task_name: str, args, port: int, output_dir_base: str, local
         "--rollout_prefill_num", str(args.rollout_prefill_num),
         "--save_dir", task_out_dir
     ]
+
+    if gt_data_dir:
+        cmd += ["--gt_data_dir", gt_data_dir]
+
     logger.info(" ".join(cmd))
-    logger.info(f"Running Task: {task_name}")
+    logger.info(f"Running Task: {task_name} Mode: {args.mode}")
     env = os.environ.copy()
     env["PYTHONWARNINGS"] = "ignore::UserWarning"
     env['CUDA_VISIBLE_DEVICES'] = str(local_rank)
@@ -138,6 +150,7 @@ def main():
     parser.add_argument("--rollout_prefill_num", type=int, default=33)
     parser.add_argument("--rollout_bound", type=int, default=60)
     parser.add_argument("--base_port", type=int, default=25400)
+    parser.add_argument("--mode", type=str, default="vidar", choices=["vidar", "gt_action"], help="Evaluation mode")
     args = parser.parse_args()
     
     

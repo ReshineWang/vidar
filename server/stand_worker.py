@@ -13,6 +13,8 @@ import io
 import base64
 from PIL import Image
 import logging
+import h5py
+import numpy as np
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,6 +30,7 @@ class Request(BaseModel):
     password: str = ""
     return_imgs: bool = False
     clean_cache: bool = False
+    gt_action_path: str = ""
 
 
 def sha256(text):
@@ -120,6 +123,35 @@ def idm_pred(request, imgs):
 
 def get_pred(request):
     global cfg
+
+    # GT Action Bypass
+    if request.gt_action_path:
+        try:
+            with h5py.File(request.gt_action_path, 'r') as f:
+                if 'joint_action' in f and 'vector' in f['joint_action']:
+                    full_actions = f['joint_action']['vector'][:]
+                elif 'action' in f:
+                    full_actions = f['action'][:]
+                else:
+                    logger.error(f"GT path {request.gt_action_path} has no 'joint_action/vector' or 'action'")
+                    return None
+            
+            # Calculate start index (0-based)
+            # num_conditional_frames starts at 1 usually. 
+            start_idx = max(0, request.num_conditional_frames - 1)
+            end_idx = start_idx + request.num_new_frames
+            
+            sliced_actions = full_actions[start_idx:end_idx]
+            
+            # For GT replay, avoid padding. Just return available actions.
+            # If we run out of actions, we return what we have.
+            
+            logger.info(f"Using GT Actions from {request.gt_action_path}, idx {start_idx}:{end_idx}, returned {len(sliced_actions)}")
+            return {"actions": json.dumps(sliced_actions.tolist())}
+
+        except Exception as e:
+            logger.error(f"Failed to load GT actions: {e}")
+            return None
     
     frame_num = request.num_conditional_frames + request.num_new_frames
     img = request.imgs[-1]

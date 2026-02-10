@@ -89,6 +89,7 @@ def main(usr_args):
     args['task_name'] = task_name
     args["task_config"] = task_config
     args["ckpt_setting"] = ckpt_setting
+    args["gt_data_dir"] = usr_args.get("gt_data_dir", "")
 
     embodiment_type = args.get("embodiment")
     embodiment_config_path = os.path.join(CONFIGS_PATH, "_embodiment_config.yml")
@@ -165,6 +166,7 @@ def main(usr_args):
     seed = usr_args["seed"]
 
     st_seed = 100000 * (1 + seed)
+    print(f"[DEBUG]: Start evaluation with seed: {st_seed}")
     suc_nums = []
     test_num = 10
     topk = 1
@@ -212,19 +214,53 @@ def eval_policy(task_name,
     succ_seed = 0
     suc_test_seed_list = []
 
-    policy_name = args["policy_name"]
-    eval_func = eval_function_decorator(policy_name, "eval")
-    reset_func = eval_function_decorator(policy_name, "reset_model")
+    POLICY_NAME = args["policy_name"]
+    eval_func = eval_function_decorator(POLICY_NAME, "eval")
+    reset_func = eval_function_decorator(POLICY_NAME, "reset_model")
 
     now_seed = st_seed
     task_total_reward = 0
     clear_cache_freq = args["clear_cache_freq"]
 
     args["eval_mode"] = True
+    
+    # GT Data Dir logic
+    gt_data_dir = args.get("gt_data_dir", "")
+    gt_seeds = []
+    if gt_data_dir:
+        try:
+            seed_file = os.path.join(os.path.dirname(gt_data_dir), "seed.txt")
+            if os.path.exists(seed_file):
+                with open(seed_file, "r") as f:
+                    content = f.read().strip()
+                    if content:
+                        gt_seeds = [int(x) for x in content.split()]
+                        clean_print(f"Loaded {len(gt_seeds)} seeds from {seed_file}")
+                        # Update test_num to match available seeds/trajectories
+                        test_num = len(gt_seeds)
+            else:
+                clean_print(f"Warning: Seed file not found at {seed_file}")
+        except Exception as e:
+            clean_print(f"Error loading seeds: {e}")
 
-    while succ_seed < test_num:
+    # Start Eval Loop
+    # We use 'episode_idx' to track the 0-indexed count of successful episodes we want to run
+    episode_idx = 0 
+    
+    while episode_idx < test_num:
         render_freq = args["render_freq"]
         args["render_freq"] = 0
+
+        # Determine current seed
+        if gt_data_dir and gt_seeds:
+            # Use specific seed from file
+            if episode_idx < len(gt_seeds):
+                now_seed = gt_seeds[episode_idx]
+            else:
+                break # Should not happen if test_num is set correctly
+        else:
+            # Default behavior (passed from st_seed) - already handled by incrementing now_seed in loops
+            pass
 
         if expert_check:
             try:
@@ -236,36 +272,71 @@ def eval_policy(task_name,
                 # clean_print("Error: ", e)
                 # clean_print(" -------------")
                 TASK_ENV.close_env()
-                now_seed += 1
+                if not (gt_data_dir and gt_seeds):
+                     now_seed += 1
                 args["render_freq"] = render_freq
+                # If using fixed seeds, failing a seed is problematic. 
+                # But usually we just retry or skip. If skip, we increment episode_idx.
+                # Here original logic tries next seed for SAME episode ID.
+                # For GT Replay, if setup fails, we probably can't replay that specific trajectory easily unless we fix the env.
+                # Let's assume GT replay seeds are valid. If fail, maybe just skip this episode0/seed0 pair?
+                # But mapping is strict: episode{i} <-> seed{i}.
+                # If setup fails with seed{i}, we can't use episode{i}.
+                # So we must skip both.
+                if gt_data_dir and gt_seeds:
+                     clean_print(f"\033[91mSetup failed for GT seed {now_seed}, skipping episode {episode_idx}\033[0m")
+                     episode_idx += 1 # Skip this GT episode
                 continue
             except Exception as e:
                 # stack_trace = traceback.format_exc()
                 # clean_print(" -------------")
                 # clean_print("Error: ", e)
                 # clean_print(" -------------")
-                TASK_ENV.close_env()
-                now_seed += 1
+                TASK_ENV.close_env() 
+                if not (gt_data_dir and gt_seeds):
+                     now_seed += 1
                 args["render_freq"] = render_freq
                 clean_print("error occurs !")
+                if gt_data_dir and gt_seeds:
+                     clean_print(f"\033[91mError for GT seed {now_seed}, skipping episode {episode_idx}\033[0m")
+                     episode_idx += 1
                 continue
 
+        # If we are here, setup_demo succeeded (or expert_check passed)
+        # Note: Original logic `if (not expert_check) or ...` 
+        # Since we just ran setup_demo successfully above (if expert_check=True), we can proceed.
+        
+        # Original logic had a check `TASK_ENV.plan_success`.
+        # For GT Replay, play_once might not be fully indicative if we just want to reset to initial state.
+        # But let's keep original flow.
+        
         if (not expert_check) or (TASK_ENV.plan_success and TASK_ENV.check_success()):
-            succ_seed += 1
-            suc_test_seed_list.append(now_seed)
+            # Valid seed found. 
+            pass # We proceed to run eval
         else:
-            now_seed += 1
+            # Plan failed (unsolvable with expert?)
+            if not (gt_data_dir and gt_seeds):
+                now_seed += 1
             args["render_freq"] = render_freq
+            if gt_data_dir and gt_seeds:
+                 clean_print(f"\033[91mExpert plan failed for GT seed {now_seed}, skipping episode {episode_idx}\033[0m")
+                 episode_idx += 1
             continue
 
         args["render_freq"] = render_freq
 
+        # Re-setup for actual eval
         TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
         episode_info_list = [episode_info["info"]]
         results = generate_episode_descriptions(args["task_name"], episode_info_list, test_num)
         instruction = np.random.choice(results[0][instruction_type])
         TASK_ENV.set_instruction(instruction=instruction)  # set language instruction
 
+        if TASK_ENV.eval_video_path is not None:
+             # FFMPEG setup (omitted for brevity, assume exists)
+             pass 
+        
+        # FFMPEG Setup Block (simplified reconstruction from context)
         if TASK_ENV.eval_video_path is not None:
             ffmpeg = subprocess.Popen(
                 [
@@ -295,15 +366,25 @@ def eval_policy(task_name,
             )
             TASK_ENV._set_eval_video_ffmpeg(ffmpeg)
 
+
         succ = False
         reset_func(model)
+        
+        # Inject GT Action Path for current episode if applicable
+        if gt_data_dir and gt_seeds:
+            current_gt_path = os.path.join(gt_data_dir, f"episode{episode_idx}.hdf5")
+            if hasattr(model, "set_gt_action_path"):
+                model.set_gt_action_path(current_gt_path)
+                clean_print(f"Set GT path to {current_gt_path} for Seed {now_seed}")
+
         while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
             observation = TASK_ENV.get_obs()
             eval_func(TASK_ENV, model, observation)
             if TASK_ENV.eval_success:
                 succ = True
                 break
-        # task_total_reward += TASK_ENV.episode_score
+        
+        # Cleanup
         if TASK_ENV.eval_video_path is not None:
             TASK_ENV._del_eval_video_ffmpeg()
 
@@ -314,19 +395,26 @@ def eval_policy(task_name,
             clean_print("\033[91mFail!\033[0m")
 
         now_id += 1
-        TASK_ENV.close_env(clear_cache=((succ_seed + 1) % clear_cache_freq == 0))
+        TASK_ENV.close_env(clear_cache=((succ_seed + 1) % clear_cache_freq == 0)) # Using succ_seed for cache signal?
 
         if TASK_ENV.render_freq:
             TASK_ENV.viewer.close()
 
         TASK_ENV.test_num += 1
-
+        
+        # Statistics
         clean_print(
             f"\033[93m{task_name}\033[0m | \033[94m{args['policy_name']}\033[0m | \033[92m{args['task_config']}\033[0m | \033[91m{args['ckpt_setting']}\033[0m\n"
             f"Success rate: \033[96m{TASK_ENV.suc}/{TASK_ENV.test_num}\033[0m => \033[95m{round(TASK_ENV.suc/TASK_ENV.test_num*100, 1)}%\033[0m, current seed: \033[90m{now_seed}\033[0m\n"
         )
         # TASK_ENV._take_picture()
-        now_seed += 1
+        
+        if not (gt_data_dir and gt_seeds):
+            now_seed += 1
+            
+        # Increment our main progress counter
+        episode_idx += 1 
+        succ_seed += 1 # This was controlling the loop `while succ_seed < test_num`
 
     return now_seed, TASK_ENV.suc
 
@@ -335,6 +423,7 @@ def parse_args_and_config(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--overrides", nargs=argparse.REMAINDER)
+    parser.add_argument("--gt_data_dir", type=str, default="")
     args = parser.parse_args(args=args)
 
     with open(args.config, "r", encoding="utf-8") as f:
@@ -343,6 +432,7 @@ def parse_args_and_config(args=None):
     # Parse overrides
     def parse_override_pairs(pairs):
         override_dict = {}
+        if pairs is None: return override_dict
         for i in range(0, len(pairs), 2):
             key = pairs[i].lstrip("--")
             value = pairs[i + 1]
@@ -356,6 +446,11 @@ def parse_args_and_config(args=None):
     if args.overrides:
         overrides = parse_override_pairs(args.overrides)
         config.update(overrides)
+    
+    # Inject gt_data_dir to config if present
+    if args.gt_data_dir:
+        config["gt_data_dir"] = args.gt_data_dir
+        
     print(config)
     return config
 

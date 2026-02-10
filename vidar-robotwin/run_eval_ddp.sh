@@ -15,6 +15,9 @@ NUM_NEW_FRAMES=${5:-60}
 NUM_SAMPLING_STEP=${6:-20}
 CFG=${7:-5.0}
 
+# 模式: vidar (默认) | gt_action (使用真实 Action)
+MODE=${8:-"vidar"}
+
 # Server 脚本位置 (根据需要修改，支持 T2V 或 I2V)
 SERVER_SCRIPT="../server/stand_worker.sh"
 
@@ -22,6 +25,7 @@ SERVER_SCRIPT="../server/stand_worker.sh"
 echo "Starting Unified DDP Evaluation..."
 echo "Model: $MODEL"
 echo "Prefix: $PREFIX"
+echo "Mode: $MODE"
 echo "Server: $SERVER_SCRIPT"
 
 # 设置 Master Port 防止冲突
@@ -42,7 +46,8 @@ torchrun --nproc_per_node=$GPU_COUNT --master_port=$MASTER_PORT \
     --rollout_prefill_num 1 \
     --num_new_frames "$NUM_NEW_FRAMES" \
     --num_sampling_step "$NUM_SAMPLING_STEP" \
-    --cfg "$CFG"
+    --cfg "$CFG" \
+    --mode "$MODE"
 
 echo "Evaluation finished."
 

@@ -566,7 +566,7 @@ class Base_Task(gym.Env):
     def set_instruction(self, instruction=None):
         self.instruction = instruction
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        with open(os.path.join(base_dir, f"{self.task_name}.py"), "r") as f:
+        with open(os.path.join(base_dir, f"{self.task_name}.py"), "r", encoding="utf-8") as f:
             lines = [line.strip() for line in f.readlines() if not line.strip().startswith("#")]
         function_start_idx = None
         function_end_idx = None
