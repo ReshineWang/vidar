@@ -73,6 +73,7 @@ class AR:
         self.rollout_prefill_num = usr_args["rollout_prefill_num"]
         self.guide_scale = usr_args["guide_scale"]
         self.gt_action_path = usr_args.get("gt_action_path", "")
+        self.mode = usr_args.get("mode", "vidar")
         # Allow disabling rollout bound for GT action replay if desired, 
         # but the request slicing logic relies on it.
         # Actually, let's just make sure we update gt_action_path dynamically if needed
@@ -194,11 +195,11 @@ class AR:
             
         # GT Action Override: Request full episode at once to avoid windowing issues
         req_num_new_frames = self.num_new_frames
-        if self.gt_action_path:
+        if self.gt_action_path and self.mode in ["gt_action", "idm_action"]:
             req_num_new_frames = 5000  # Request a large chunk to get all GT actions
             clean_cache = False # Don't reset context for GT replay usually, just linear read
             
-        data = {"prompt": self.prompt, "imgs": obs_cache, "num_conditional_frames": self.num_conditional_frames, "num_new_frames": req_num_new_frames, "seed": seed, "num_sampling_step": self.num_sampling_step, "guide_scale": self.guide_scale, "password": "r49h8fieuwK", "return_imgs": True, "clean_cache": clean_cache, "gt_action_path": self.gt_action_path}
+        data = {"prompt": self.prompt, "imgs": obs_cache, "num_conditional_frames": self.num_conditional_frames, "num_new_frames": req_num_new_frames, "seed": seed, "num_sampling_step": self.num_sampling_step, "guide_scale": self.guide_scale, "password": "r49h8fieuwK", "return_imgs": True, "clean_cache": clean_cache, "gt_action_path": self.gt_action_path, "mode": self.mode}
         
         response = worker(port, headers, data, False)
         print(f"Inference done with time usage {time.time() - t}")
@@ -210,7 +211,7 @@ class AR:
             self.out_masks += response["masks"]
             
         # Update state counter
-        if self.gt_action_path:
+        if self.gt_action_path and self.mode in ["gt_action", "idm_action"]:
              self.num_conditional_frames += len(actions)
         else:
              self.num_conditional_frames += self.num_new_frames

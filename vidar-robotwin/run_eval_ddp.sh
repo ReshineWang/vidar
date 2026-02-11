@@ -15,7 +15,7 @@ NUM_NEW_FRAMES=${5:-60}
 NUM_SAMPLING_STEP=${6:-20}
 CFG=${7:-5.0}
 
-# 模式: vidar (默认) | gt_action (使用真实 Action)
+# 模式: vidar (默认) | gt_action (使用真实 Action) | idm_action (使用 IDM 推理 HDF5 观测)
 MODE=${8:-"vidar"}
 
 # Server 脚本位置 (根据需要修改，支持 T2V 或 I2V)

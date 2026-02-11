@@ -27,6 +27,8 @@ class ServerManager:
         self.port = port
         self.cwd = cwd
         self.process: Optional[subprocess.Popen] = None
+        self.log_file = None # Added This
+
 
     def _wait_for_port(self, timeout: int = 300) -> bool:
         """轮询检测端口是否开启"""
@@ -58,9 +60,13 @@ class ServerManager:
             logger.info(f"Starting Server on Port {self.port}...")
             # 使用 preexec_fn=os.setsid 创建新的进程组，方便后续杀掉整个进程树
             logger.info(' '.join(self.cmd))
+            
+            # Change: Redirect stdout/stderr to a file instead of DEVNULL
+            self.log_file = open(f"server_log_{self.port}.txt", "w")
+            
             self.process = subprocess.Popen(
                 self.cmd, cwd=self.cwd,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=self.log_file, stderr=self.log_file, # Modified This
                 preexec_fn=os.setsid
             )
 
@@ -80,6 +86,10 @@ class ServerManager:
                 os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
             except Exception as e:
                 logger.error(f"Failed to kill server process {self.process.pid}: {e}")
+        
+        # Added: Close log file
+        if self.log_file:
+            self.log_file.close()
             
 
 def run_client_task(task_name: str, args, port: int, output_dir_base: str, local_rank: int):
@@ -94,9 +104,9 @@ def run_client_task(task_name: str, args, port: int, output_dir_base: str, local
 
     os.makedirs(task_out_dir, exist_ok=True)
     
-    # 构建 GT Action Path (如果是 gt_action 模式)
+    # 构建 GT Action Path (如果是 gt_action 模式) or IDM Action Mode
     gt_data_dir = ""
-    if args.mode == "gt_action":
+    if args.mode in ["gt_action", "idm_action"]:
         gt_data_dir = f"/data/dex/RoboTwin/data/{task_name}/demo_clean_vidar/data"
         if not os.path.exists(gt_data_dir):
             logger.warning(f"GT Data dir not found for {task_name}: {gt_data_dir}")
@@ -116,7 +126,8 @@ def run_client_task(task_name: str, args, port: int, output_dir_base: str, local
         "--guide_scale", str(args.cfg),
         "--rollout_bound", str(args.rollout_bound),
         "--rollout_prefill_num", str(args.rollout_prefill_num),
-        "--save_dir", task_out_dir
+        "--save_dir", task_out_dir,
+        "--mode", args.mode # Pass mode to eval_policy so it knows to set AR mode
     ]
 
     if gt_data_dir:
@@ -150,7 +161,7 @@ def main():
     parser.add_argument("--rollout_prefill_num", type=int, default=33)
     parser.add_argument("--rollout_bound", type=int, default=60)
     parser.add_argument("--base_port", type=int, default=25400)
-    parser.add_argument("--mode", type=str, default="vidar", choices=["vidar", "gt_action"], help="Evaluation mode")
+    parser.add_argument("--mode", type=str, default="vidar", choices=["vidar", "gt_action", "idm_action"], help="Evaluation mode")
     args = parser.parse_args()
     
     
