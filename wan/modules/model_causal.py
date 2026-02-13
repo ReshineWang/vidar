@@ -15,7 +15,7 @@ try:
 except:
     CUTE_FA = False
     warnings.warn('using FA2')
-    from flash_attn.flash_attn_interface import flash_attn_func
+    # from flash_attn.flash_attn_interface import flash_attn_func
 __all__ = ['WanModelCausal']
 
 def fa_switch(q, k, v):
